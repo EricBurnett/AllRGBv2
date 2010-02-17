@@ -1,0 +1,35 @@
+Copyright:
+    KDTreeDLL and all files under it are based on the version provided by Marco 
+    A Alvarez at http://www.cs.wlu.edu/~levy/software/kd/ , and released under 
+    the LGPL.
+
+    AllRGBv2 and files under it are copyright 2010 Eric Burnett except where
+    noted, and provided under the LGPL.
+
+    Please see COPYING.LESSER for the LGPL terms, and COPYING for the GPL terms.
+	
+Usage:
+    allRGBv2 "path to image.png" bitsPerChannel colorSpace
+    eg:
+        allRGBv2 "me.png" 6 RGB
+        
+    bitsPerChannel can be one of:
+        2: 8x8 output image
+        4: 64x64 output image
+        6: 512x512 output image
+        8: 4096x4096 output image
+        
+    colorSpace can be one of:
+        RGB
+        HSL
+        HSV
+        
+    the output will be [image name]_allRGBv2.png in the same directory.
+    
+Performace:
+    Generating a full 4096x4096 image can take 35+ hours, and peak over 4 GB
+    of memory. The fewer the number of colors in the input image or the worse
+    the color balance, the longer it will take.
+    
+    Pixel processing rate will decrease over time, only increasing again right
+    at the end.
