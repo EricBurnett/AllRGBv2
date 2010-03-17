@@ -1,4 +1,4 @@
-﻿// Copyright 2010 Eric Burnett, except where noted.
+// Copyright 2010 Eric Burnett, except where noted.
 // Licensed for use under the LGPL (or others similar licenses on request).
 
 using System;
@@ -16,6 +16,11 @@ namespace AllRGBv2 {
     };
 
     class AllRGBv2 {
+        private static double   DIAGONAL_WEIGHT     = Math.Sqrt(1 / 2.0);
+        private static float    ERROR_CAP           = 40;
+        private static double   ERROR_ATTENUATION   = 1;
+        private static bool     USE_ERROR_DIFFUSION = true;
+
         static void Main(string[] args) {
             Config c = tryParseArgs(args);
             if (c == null) {
@@ -23,7 +28,8 @@ namespace AllRGBv2 {
                 Console.Out.WriteLine("EG: AllRGBv2 in.png 6 HSV");
                 return;
             }
-            allRGBify(c.Path, c.Bpc, c.Cs);
+            string mask = null; // "C:/Users/Eric Burnett/Desktop/package/3_mask.png";
+            allRGBify(c.Path, mask, c.Bpc, c.Cs);
         }
 
         // Try to parse the command line arguments into an understandable
@@ -59,7 +65,7 @@ namespace AllRGBv2 {
         // remaining color to map it to. The number of color bits per channel
         // used dictates the size of the output image ([image]_allRGBv2.png). 
         // Uses the specified color space for coordinate locations.
-        static void allRGBify(string path, int bitsPerChannel, ColorSpace cs) {
+        static void allRGBify(string path, string maskPath, int bitsPerChannel, ColorSpace cs) {
             if ((bitsPerChannel & 1) != 0) {
                 Console.Out.WriteLine("bitsPerChannel must be divisible by 2");
                 return;
@@ -79,7 +85,7 @@ namespace AllRGBv2 {
                 new Rectangle(0, 0, imageSize, imageSize),
                 ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
 
-            // Load the raw pixel data, RGBRGBRGB..... Note that it may contain
+            // Load the raw pixel data, BGRBGRBGR..... Note that it may contain
             // padding at the end of rows; need to be very careful when indexing!
             int pixelBytes = bitmapData.Stride * bitmapData.Height;
             Debug.Assert(pixelBytes >= numPixels * 3);
@@ -87,8 +93,39 @@ namespace AllRGBv2 {
             System.Runtime.InteropServices.Marshal.Copy(
                 bitmapData.Scan0, pixels, 0, pixelBytes);
 
+            // If available, load the pixel mask as well
+            // True is high priority, false is low.
+            bool[,] maskFlags = new bool[imageSize, imageSize];
+            if (maskPath != null && maskPath != "") {
+
+                Bitmap mask = new Bitmap(Image.FromFile(maskPath), imageSize, imageSize);
+
+                for (int y = 0; y < imageSize; ++y) {
+                    for (int x = 0; x < imageSize; ++x) {
+                        if (mask.GetPixel(x, y).R == 0) {
+                            maskFlags[y, x] = true;
+                        }
+                    }
+                }
+            }
+
+            // Set up error diffusion, if it is turned on. At the same time,
+            // calculate the average color of the image for the initial error
+            // term.
+            float[, ,] pixelError = null;   // To be added to the corresponding 
+            // pixel's color to get the target
+            // color for lookup. 
+            // Note: Order is y,x,{R,G,B}.
+            bool[,] donePixels = null;
+            if (USE_ERROR_DIFFUSION) {
+                donePixels = new bool[imageSize, imageSize];
+                pixelError = new float[imageSize, imageSize, 3];
+
+                initializeErrorDiffusion(pixelError, pixels, bitmapData.Stride, imageSize);
+            }
+
             // A random ordering of the pixels to process.
-            Pair<int, int>[] coords = getRandomPixelOrdering(imageSize, imageSize);
+            Pair<int, int>[] coords = getRandomPixelOrdering(maskFlags, imageSize, imageSize);
 
             // A KDTree of all the candidate colors the pixels can be mapped to.
             // We periodically need to rebuild this tree to keep it from getting
@@ -97,6 +134,8 @@ namespace AllRGBv2 {
             int pixelsTillRebuild = coords.Length * 1 / 4;
             pixelsTillRebuild = Math.Min(pixelsTillRebuild, 1 << 19);
 
+            // Actually look up the colours, writing back to the pixel array as
+            // we go.
             for (int i = 0; i < coords.Length; ++i) {
                 if ((i & ((1 << 7) - 1)) == 0) {
                     Console.Out.WriteLine("Done " + i + " pixels");
@@ -122,18 +161,39 @@ namespace AllRGBv2 {
                 pixelsTillRebuild--;
 
                 Pair<int, int> coord = coords[i];
-                int pixelIndex = coord.First * bitmapData.Stride + 3 * coord.Second;
-                byte oldR = pixels[pixelIndex];
-                byte oldG = pixels[pixelIndex + 1];
-                byte oldb = pixels[pixelIndex + 2];
+                int x = coord.First;
+                int y = coord.Second;
+                int pixelIndex = y * bitmapData.Stride + 3 * x;
+                byte oldR;
+                byte oldG;
+                byte oldb;
+                if (USE_ERROR_DIFFUSION) {
+                    oldR = capToByte(pixels[pixelIndex + 2] +
+                        pixelError[y, x, 0]);
+                    oldG = capToByte(pixels[pixelIndex + 1] +
+                        pixelError[y, x, 1]);
+                    oldb = capToByte(pixels[pixelIndex + 0] +
+                        pixelError[y, x, 2]);
+                } else {
+                    oldR = pixels[pixelIndex + 2];
+                    oldG = pixels[pixelIndex + 1];
+                    oldb = pixels[pixelIndex + 0];
+                }
                 ColorLocation oldColor = new ColorLocation(oldR, oldG, oldb, cs);
 
                 ColorLocation newColor = (ColorLocation)kd.nearest(oldColor.Location);
                 kd.delete(newColor.Location);
 
-                pixels[pixelIndex] = newColor.R;
+                if (USE_ERROR_DIFFUSION) {
+                    pixelError[y, x, 0] += pixels[pixelIndex + 2] - newColor.R;
+                    pixelError[y, x, 1] += pixels[pixelIndex + 1] - newColor.G;
+                    pixelError[y, x, 2] += pixels[pixelIndex + 0] - newColor.B;
+                    markPixelDoneAndSpreadError(donePixels, pixelError, imageSize, x, y);
+                }
+
+                pixels[pixelIndex + 2] = newColor.R;
                 pixels[pixelIndex + 1] = newColor.G;
-                pixels[pixelIndex + 2] = newColor.B;
+                pixels[pixelIndex + 0] = newColor.B;
             }
 
             // Finally, load the pixels back into the bitmap and save out.
@@ -151,15 +211,156 @@ namespace AllRGBv2 {
                                   " took " + totalTime.ToString());
         }
 
-        // Create a random ordering of the pixels in an image.
-        static Pair<int, int>[] getRandomPixelOrdering(int width, int height) {
-            Pair<int, int>[] coords = new Pair<int, int>[width * height];
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; ++x) {
-                    coords[y * width + x] = new Pair<int, int>(x, y);
+        // Marks a pixel as done, and moves it's error to neighboring unfinished
+        // pixels, weighted by position.
+        static void markPixelDoneAndSpreadError(bool[,] donePixels,
+                float[, ,] pixelError, int imageSize, int x, int y) {
+            Debug.Assert(donePixels[y,x] == false);
+            donePixels[y, x] = true;
+
+            // Find the total weight of pixels that are candadites for receiving
+            // a portion of the error.
+            double totalWeight = 0;
+            for (int testY = Math.Max(y - 1, 0);
+                    testY <= Math.Min(y + 1, imageSize - 1);
+                    testY += 1) {
+                for (int testX = Math.Max(x - 1, 0);
+                        testX <= Math.Min(x + 1, imageSize - 1);
+                        testX += 1) {
+                    if (donePixels[testY, testX]) continue;
+
+                    double weight = 1;
+                    if (testX != x && testY != y) {
+                        weight = DIAGONAL_WEIGHT;
+                    }
+                    totalWeight += weight;
                 }
             }
-            coords.Shuffle();
+
+            // Move the error to any candidate neighbor pixels
+            for (int testY = Math.Max(y - 1, 0);
+                    testY <= Math.Min(y + 1, imageSize - 1);
+                    testY += 1) {
+                for (int testX = Math.Max(x - 1, 0);
+                        testX <= Math.Min(x + 1, imageSize - 1);
+                        testX += 1) {
+                    if (donePixels[testY, testX]) continue;
+
+                    double weight = 1;
+                    if (testX != x && testY != y) {
+                        // Pixel is diagonal from target
+                        weight = DIAGONAL_WEIGHT;
+                    }
+                    pixelError[testY, testX, 0] +=
+                        (float)(pixelError[y, x, 0] * ERROR_ATTENUATION *
+                        weight / totalWeight);
+                    pixelError[testY, testX, 1] +=
+                        (float)(pixelError[y, x, 1] * ERROR_ATTENUATION *
+                        weight / totalWeight);
+                    pixelError[testY, testX, 2] +=
+                        (float)(pixelError[y, x, 2] * ERROR_ATTENUATION *
+                        weight / totalWeight);
+
+                    pixelError[testY, testX, 0] =
+                        Math.Max(pixelError[testY, testX, 0], -ERROR_CAP);
+                    pixelError[testY, testX, 0] =
+                        Math.Min(pixelError[testY, testX, 0], ERROR_CAP);
+
+                    pixelError[testY, testX, 1] =
+                        Math.Max(pixelError[testY, testX, 1], -ERROR_CAP);
+                    pixelError[testY, testX, 1] =
+                        Math.Min(pixelError[testY, testX, 1], ERROR_CAP);
+
+                    pixelError[testY, testX, 2] =
+                        Math.Max(pixelError[testY, testX, 2], -ERROR_CAP);
+                    pixelError[testY, testX, 2] =
+                        Math.Min(pixelError[testY, testX, 2], ERROR_CAP);
+
+                }
+            }
+
+            pixelError[y, x, 0] = 0;
+            pixelError[y, x, 1] = 0;
+            pixelError[y, x, 2] = 0;
+        }
+
+        // Setup the initial error matrix with the deviation from the expected
+        // average color of the image, neutral gray, to avoid systemic errors.
+        static void initializeErrorDiffusion(float[, ,] error, byte[] pixels, 
+                int stride, int imageSize) {
+            int numPixels = imageSize * imageSize;
+
+            // Calculate average color of image.
+            long[] totalColor = new long[3];
+            for (int y = 0; y < imageSize; ++y) {
+                for (int x = 0; x < imageSize; ++x) {
+                    int pixel = y * stride + x * 3;
+                    totalColor[0] += pixels[pixel + 2];
+                    totalColor[1] += pixels[pixel + 1];
+                    totalColor[2] += pixels[pixel + 0];
+                }
+            }
+            float[] averageColor = new float[3];
+            averageColor[0] = (float) ((double)totalColor[0] / numPixels);
+            averageColor[1] = (float) ((double)totalColor[1] / numPixels);
+            averageColor[2] = (float) ((double)totalColor[2] / numPixels);
+
+            Console.Out.WriteLine("Average image color: {0:f2}, {1:f2}, {2:f2}",
+                averageColor[0], averageColor[1], averageColor[2]);
+
+            // Error from the expected average color (neutral gray).
+            float[] averageError = new float[3];
+            averageError[0] = 127.5f - averageColor[0];
+            averageError[1] = 127.5f - averageColor[1];
+            averageError[2] = 127.5f - averageColor[2];
+            Console.Out.WriteLine("Average pixel error: {0:f2}, {1:f2}, {2:f2}", 
+                averageError[0], averageError[1], averageError[2]);
+
+            // Initialize the error array using this error term for each pixel.
+            for (int y = 0; y < imageSize; ++y) {
+                for (int x = 0; x < imageSize; ++x) {
+                    error[y, x, 0] = averageError[0];
+                    error[y, x, 1] = averageError[1];
+                    error[y, x, 2] = averageError[2];
+                }
+            }
+
+            Console.Out.WriteLine("Error diffusion array initialized.");
+        }
+
+        // Create a random ordering of the pixels in an image.
+        // All coordinates with a set mask flag will appear before those
+        // without, but the order will be random within each region.
+        static Pair<int, int>[] getRandomPixelOrdering(bool[,] mask, int width, int height) {
+            Pair<int, int>[] coords = new Pair<int, int>[width * height];
+            Pair<int, int>[] setCoords = new Pair<int, int>[width * height];
+            Pair<int, int>[] unsetCoords = new Pair<int, int>[width * height];
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    if (mask[y,x]) {
+                        setCoords[y * width + x] = new Pair<int, int>(x, y);
+                    } else {
+                        unsetCoords[y * width + x] = new Pair<int, int>(x, y);
+                    }
+                }
+            }
+            setCoords.Shuffle();
+            unsetCoords.Shuffle();
+
+            int usedCoords = 0;
+            for (int i = 0; i < setCoords.Length; ++i) {
+                if (setCoords[i] != null) {
+                    coords[usedCoords] = setCoords[i];
+                    usedCoords++;
+                }
+            }
+            for (int i = 0; i < unsetCoords.Length; ++i) {
+                if (unsetCoords[i] != null) {
+                    coords[usedCoords] = unsetCoords[i];
+                    usedCoords++;
+                }
+            }
+            Debug.Assert(usedCoords == coords.Length);
             return coords;
         }
 
@@ -217,6 +418,14 @@ namespace AllRGBv2 {
                 high[i] = Double.PositiveInfinity;
             }
             return kd.range(low, high);
+        }
+
+        // Returns the target color value as a byte, capped to the range 
+        // [0, 255].
+        static byte capToByte(float f) {
+            if (f < 0) return 0;
+            if (f > 255) return 255;
+            return (byte)f;
         }
     }
 }
