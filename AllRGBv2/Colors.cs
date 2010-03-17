@@ -1,4 +1,4 @@
-﻿// Copyright 2010 Eric Burnett, except where noted.
+// Copyright 2010 Eric Burnett, except where noted.
 // Licensed for use under the LGPL (or others similar licenses on request).
 
 using System.Drawing;
@@ -49,7 +49,7 @@ namespace AllRGBv2 {
             double s = c.GetSaturation();
             X = Math.Cos(theta) * s;
             Y = Math.Sin(theta) * s;
-            Z = 2 * c.GetBrightness();
+            Z = c.GetBrightness();
         }
 
         private void setLocationAsHSL() {
@@ -64,7 +64,7 @@ namespace AllRGBv2 {
             double theta = hsl_h * Math.PI / 180.0;
             X = Math.Cos(theta) * hsl_s;
             Y = Math.Sin(theta) * hsl_s;
-            Z = 2 * hsl_l;
+            Z = hsl_l;
         }
 
         private void setLocationAsRGB() {
